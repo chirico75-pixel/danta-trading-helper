@@ -1,0 +1,110 @@
+INFO:     Will watch for changes in these directories: ['G:\\내 드라이브\\Antigravity_Projects\\기술적분석 강의\\2301_진욱형님_비공개\\단타보조시스템']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [31052] using WatchFiles
+INFO:     Started server process [28684]
+INFO:     Waiting for application startup.
+INFO:watchfiles.main:1 change detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:2 changes detected
+WARNING:root:KIS API keys not set \u2014 polling disabled
+INFO:     Application startup complete.
+INFO:     127.0.0.1:11948 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12055 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9967 - "GET /api/ranking?market=J HTTP/1.1" 200 OK
+INFO:     127.0.0.1:10166 - "GET /api/ranking?market=Q HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14558 - "GET /api/ranking?market=ALL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9967 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:10166 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:4471 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12025 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4786 - "GET /api/ranking?market=J HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4786 - "GET /api/ranking?market=Q HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4786 - "GET /api/ranking?market=ALL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:6945 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4786 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9794 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11574 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11594 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11604 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11614 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11624 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11638 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11648 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11659 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11669 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11679 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11689 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11700 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11715 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11725 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11735 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11745 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11755 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11765 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11775 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11785 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11799 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11809 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11819 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11829 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11839 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11849 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11863 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11873 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7733 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:10965 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7792 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11836 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11846 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11861 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11872 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11883 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11893 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11117 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8082 - "GET /api/ranking?market=J HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8082 - "GET /api/ranking?market=Q HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8082 - "GET /api/ranking?market=ALL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12848 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8082 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1128 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14829 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14839 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14853 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14875 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14885 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14895 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14905 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14915 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14925 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3203 - "GET /api/ranking?market=J HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14819 - "GET /api/ranking?market=Q HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3203 - "GET /api/ranking?market=ALL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14462 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14819 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3203 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1420 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1430 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1440 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1450 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1460 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1470 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1480 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1494 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1504 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1514 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1524 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1534 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1544 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1561 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1410 - "GET /api/ranking?market=J HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1410 - "GET /api/ranking?market=Q HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1410 - "GET /api/ranking?market=ALL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2659 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1410 - "GET /api/trades HTTP/1.1" 200 OK
+INFO:     127.0.0.1:1525 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:11387 - "GET /health HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:11393 - "GET /api/v1/gauge HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:12024 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8466 - "GET /events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:13641 - "GET /events HTTP/1.1" 200 OK

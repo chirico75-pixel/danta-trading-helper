@@ -1,0 +1,184 @@
+import aiosqlite
+import os
+
+DB_PATH = os.getenv("DB_PATH", "trades.db")
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                date       DATE    NOT NULL,
+                ticker     TEXT    NOT NULL,
+                name       TEXT    NOT NULL,
+                side       TEXT    NOT NULL CHECK(side IN ('BUY','SELL')),
+                price      INTEGER NOT NULL,
+                amount     INTEGER NOT NULL,
+                reason     TEXT,
+                pnl        INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker       TEXT    NOT NULL UNIQUE,
+                name         TEXT    NOT NULL,
+                target_price INTEGER,
+                stop_loss    INTEGER,
+                memo         TEXT,
+                added_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS checklist_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker     TEXT    NOT NULL,
+                date       DATE    NOT NULL,
+                score      INTEGER NOT NULL,
+                news_ok    BOOLEAN DEFAULT 0,
+                volume_ok  BOOLEAN DEFAULT 0,
+                surge_ok   BOOLEAN DEFAULT 0,
+                naver_ok   BOOLEAN DEFAULT 0,
+                cap_ok     BOOLEAN DEFAULT 0,
+                no_chain   BOOLEAN DEFAULT 0,
+                result     TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # FR-7 교육 커리큘럼 진행 점검 (산출물 단위 완료 기록)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS curriculum_progress (
+                item_key   TEXT    PRIMARY KEY,
+                done       BOOLEAN DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # 마이그레이션: 체크리스트 실제 결과(WIN/LOSS) 컬럼 (기존 DB 호환, add-only)
+        try:
+            await conn.execute("ALTER TABLE checklist_history ADD COLUMN outcome TEXT")
+        except Exception:
+            pass  # 이미 존재
+        await conn.commit()
+
+async def add_trade(date, ticker, name, side, price, amount, reason=""):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO trades (date,ticker,name,side,price,amount,reason) VALUES (?,?,?,?,?,?,?)",
+            (date, ticker, name, side, price, amount, reason)
+        )
+        await conn.commit()
+
+async def get_trades_by_date(date: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT * FROM trades WHERE date=? ORDER BY created_at DESC", (date,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+async def get_trades_all() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM trades ORDER BY created_at DESC") as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+async def update_trade_pnl(trade_id: int, pnl: int):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("UPDATE trades SET pnl=? WHERE id=?", (pnl, trade_id))
+        await conn.commit()
+
+async def delete_trade(trade_id: int):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM trades WHERE id=?", (trade_id,))
+        await conn.commit()
+
+async def add_watchlist(ticker: str, name: str, target_price: int = None, stop_loss: int = None, memo: str = ""):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO watchlist (ticker,name,target_price,stop_loss,memo) VALUES (?,?,?,?,?)",
+            (ticker, name, target_price, stop_loss, memo)
+        )
+        await conn.commit()
+
+async def get_watchlist() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM watchlist ORDER BY added_at DESC") as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+async def remove_watchlist(ticker: str):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM watchlist WHERE ticker=?", (ticker,))
+        await conn.commit()
+
+async def save_checklist(ticker, date, score, news_ok, volume_ok, surge_ok, naver_ok, cap_ok, no_chain, result):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute("""
+            INSERT INTO checklist_history
+              (ticker,date,score,news_ok,volume_ok,surge_ok,naver_ok,cap_ok,no_chain,result)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (ticker, date, score, news_ok, volume_ok, surge_ok, naver_ok, cap_ok, no_chain, result))
+        await conn.commit()
+        return cur.lastrowid
+
+
+# ── FR-7 교육 커리큘럼 진행 ────────────────────────────
+async def get_curriculum_done() -> dict:
+    """완료 표시된 item_key → True 매핑 반환"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT item_key, done FROM curriculum_progress") as cur:
+            rows = await cur.fetchall()
+    return {r["item_key"]: bool(r["done"]) for r in rows}
+
+
+async def set_curriculum_item(item_key: str, done: bool):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO curriculum_progress (item_key, done, updated_at) "
+            "VALUES (?,?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(item_key) DO UPDATE SET done=excluded.done, updated_at=CURRENT_TIMESTAMP",
+            (item_key, 1 if done else 0)
+        )
+        await conn.commit()
+
+
+# ── 체크리스트 결과 피드백 ─────────────────────────────
+async def get_checklist_history(limit: int = 50) -> list:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT id,ticker,date,score,result,outcome,created_at "
+            "FROM checklist_history ORDER BY id DESC LIMIT ?", (limit,)) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def set_checklist_outcome(check_id: int, outcome):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("UPDATE checklist_history SET outcome=? WHERE id=?", (outcome, check_id))
+        await conn.commit()
+
+
+async def get_checklist_stats() -> dict:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT score, outcome FROM checklist_history") as cur:
+            rows = await cur.fetchall()
+    bands = [("진입검토(70+)", 70, 1000), ("관망(50~69)", 50, 70), ("제외(<50)", 0, 50)]
+    out = []
+    for label, lo, hi in bands:
+        sel = [r for r in rows if lo <= (r["score"] or 0) < hi]
+        win = sum(1 for r in sel if r["outcome"] == "WIN")
+        loss = sum(1 for r in sel if r["outcome"] == "LOSS")
+        decided = win + loss
+        out.append({
+            "band": label, "total": len(sel), "win": win, "loss": loss,
+            "pending": len(sel) - decided,
+            "win_rate": round(win / decided * 100) if decided else None,
+        })
+    return {"bands": out, "total": len(rows)}

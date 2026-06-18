@@ -1,0 +1,1715 @@
+# 단타 보조 시스템 구현 계획
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** KIS Open API와 연동해 실시간 급등 랭킹·상한가 체크리스트·강일지·관심종목 모니터링을 단일 브라우저 화면에서 제공하는 로컬 웹 앱을 구축한다.
+
+**Architecture:** FastAPI 백엔드가 KIS REST API를 5초마다 폴링해 상승률 랭킹을 갱신하고, 관심 종목은 KIS WebSocket으로 실시간 체결가를 수신한다. 브라우저는 SSE(Server-Sent Events)로 갱신 데이터를 받으며, 강일지는 SQLite에 영구 저장된다. 프론트엔드는 외부 CDN 없는 단일 HTML 파일이다.
+
+**Tech Stack:** Python 3.11+, FastAPI, uvicorn, APScheduler, websockets, aiosqlite, httpx, python-dotenv / 순수 HTML·CSS·JS
+
+**Spec:** `docs/superpowers/specs/2026-05-27-단타보조시스템-design.md`
+
+---
+
+## 파일 구조
+
+```
+단타보조시스템/
+├── main.py            # FastAPI 앱 진입점·라우터 등록·lifespan
+├── kis_client.py      # KIS REST 토큰·랭킹·현재가 클라이언트
+├── ws_manager.py      # KIS WebSocket 구독 관리 및 재연결
+├── sse_broker.py      # SSE 이벤트 브로드캐스터
+├── scheduler.py       # APScheduler 5초 폴링 태스크
+├── database.py        # SQLite aiosqlite 모델·CRUD
+├── static/
+│   └── index.html     # 단일 프론트엔드 (4패널 대시보드)
+├── tests/
+│   ├── test_database.py
+│   ├── test_kis_client.py
+│   └── test_api.py
+├── .env               # KIS API 키 (gitignore)
+├── .env.example       # 키 설정 템플릿
+├── .gitignore
+└── requirements.txt
+```
+
+---
+
+## Task 1: 프로젝트 스캐폴딩
+
+**Files:**
+- Create: `단타보조시스템/requirements.txt`
+- Create: `단타보조시스템/.env.example`
+- Create: `단타보조시스템/.gitignore`
+
+- [ ] **Step 1: 프로젝트 디렉토리 생성**
+
+```bash
+mkdir "단타보조시스템"
+cd "단타보조시스템"
+mkdir static tests
+```
+
+- [ ] **Step 2: requirements.txt 작성**
+
+```
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+httpx==0.27.0
+websockets==12.0
+aiosqlite==0.20.0
+APScheduler==3.10.4
+python-dotenv==1.0.1
+pytest==8.2.0
+pytest-asyncio==0.23.6
+```
+
+- [ ] **Step 3: .env.example 작성**
+
+```
+# 한국투자증권 Open API 키 (https://apiportal.koreainvestment.com)
+KIS_APP_KEY=your_app_key_here
+KIS_APP_SECRET=your_app_secret_here
+KIS_ACCOUNT_NO=your_account_number_here   # 예: 50123456-01
+KIS_MOCK=false   # true 이면 모의투자 서버 사용
+```
+
+- [ ] **Step 4: .gitignore 작성**
+
+```
+.env
+*.db
+.token_cache
+__pycache__/
+*.pyc
+.pytest_cache/
+```
+
+- [ ] **Step 5: 의존성 설치**
+
+```bash
+pip install -r requirements.txt
+```
+
+Expected: Successfully installed fastapi-0.111.0 ... (오류 없음)
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add requirements.txt .env.example .gitignore
+git commit -m "chore: project scaffolding"
+```
+
+---
+
+## Task 2: 데이터베이스 레이어
+
+**Files:**
+- Create: `단타보조시스템/database.py`
+- Create: `단타보조시스템/tests/test_database.py`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_database.py`:
+
+```python
+import pytest
+import pytest_asyncio
+from database import init_db, add_trade, get_trades_by_date, add_watchlist, get_watchlist, save_checklist
+
+@pytest_asyncio.fixture
+async def db(tmp_path):
+    import database
+    database.DB_PATH = str(tmp_path / "test.db")
+    await init_db()
+    yield
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as conn:
+        await conn.execute("DROP TABLE IF EXISTS trades")
+        await conn.execute("DROP TABLE IF EXISTS watchlist")
+        await conn.execute("DROP TABLE IF EXISTS checklist_history")
+        await conn.commit()
+
+@pytest.mark.asyncio
+async def test_add_and_get_trade(db):
+    await add_trade("2026-05-27", "005930", "삼성전자", "BUY", 75000, 5000000, "반도체 호재")
+    trades = await get_trades_by_date("2026-05-27")
+    assert len(trades) == 1
+    assert trades[0]["ticker"] == "005930"
+    assert trades[0]["pnl"] == 0
+
+@pytest.mark.asyncio
+async def test_add_and_get_watchlist(db):
+    await add_watchlist("005930", "삼성전자", 80000, 70000)
+    items = await get_watchlist()
+    assert len(items) == 1
+    assert items[0]["ticker"] == "005930"
+
+@pytest.mark.asyncio
+async def test_save_checklist(db):
+    await save_checklist("005930", "2026-05-27", 85, True, True, True, True, False, True, "진입 검토")
+    import aiosqlite
+    import database
+    async with aiosqlite.connect(database.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM checklist_history WHERE ticker='005930'") as cur:
+            row = await cur.fetchone()
+    assert row["score"] == 85
+```
+
+- [ ] **Step 2: 테스트 실행 (실패 확인)**
+
+```bash
+cd 단타보조시스템
+pytest tests/test_database.py -v
+```
+
+Expected: `ModuleNotFoundError: No module named 'database'`
+
+- [ ] **Step 3: database.py 구현**
+
+```python
+import aiosqlite
+import os
+
+DB_PATH = os.getenv("DB_PATH", "trades.db")
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                date       DATE    NOT NULL,
+                ticker     TEXT    NOT NULL,
+                name       TEXT    NOT NULL,
+                side       TEXT    NOT NULL CHECK(side IN ('BUY','SELL')),
+                price      INTEGER NOT NULL,
+                amount     INTEGER NOT NULL,
+                reason     TEXT,
+                pnl        INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker       TEXT    NOT NULL UNIQUE,
+                name         TEXT    NOT NULL,
+                target_price INTEGER,
+                stop_loss    INTEGER,
+                memo         TEXT,
+                added_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS checklist_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker     TEXT    NOT NULL,
+                date       DATE    NOT NULL,
+                score      INTEGER NOT NULL,
+                news_ok    BOOLEAN DEFAULT 0,
+                volume_ok  BOOLEAN DEFAULT 0,
+                surge_ok   BOOLEAN DEFAULT 0,
+                naver_ok   BOOLEAN DEFAULT 0,
+                cap_ok     BOOLEAN DEFAULT 0,
+                no_chain   BOOLEAN DEFAULT 0,
+                result     TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.commit()
+
+async def add_trade(date, ticker, name, side, price, amount, reason=""):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO trades (date,ticker,name,side,price,amount,reason) VALUES (?,?,?,?,?,?,?)",
+            (date, ticker, name, side, price, amount, reason)
+        )
+        await conn.commit()
+
+async def get_trades_by_date(date: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT * FROM trades WHERE date=? ORDER BY created_at DESC", (date,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+async def get_trades_all() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM trades ORDER BY created_at DESC") as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+async def update_trade_pnl(trade_id: int, pnl: int):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("UPDATE trades SET pnl=? WHERE id=?", (pnl, trade_id))
+        await conn.commit()
+
+async def delete_trade(trade_id: int):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM trades WHERE id=?", (trade_id,))
+        await conn.commit()
+
+async def add_watchlist(ticker: str, name: str, target_price: int = None, stop_loss: int = None, memo: str = ""):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO watchlist (ticker,name,target_price,stop_loss,memo) VALUES (?,?,?,?,?)",
+            (ticker, name, target_price, stop_loss, memo)
+        )
+        await conn.commit()
+
+async def get_watchlist() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM watchlist ORDER BY added_at DESC") as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+async def remove_watchlist(ticker: str):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM watchlist WHERE ticker=?", (ticker,))
+        await conn.commit()
+
+async def save_checklist(ticker, date, score, news_ok, volume_ok, surge_ok, naver_ok, cap_ok, no_chain, result):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("""
+            INSERT INTO checklist_history
+              (ticker,date,score,news_ok,volume_ok,surge_ok,naver_ok,cap_ok,no_chain,result)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (ticker, date, score, news_ok, volume_ok, surge_ok, naver_ok, cap_ok, no_chain, result))
+        await conn.commit()
+```
+
+- [ ] **Step 4: 테스트 실행 (통과 확인)**
+
+```bash
+pytest tests/test_database.py -v
+```
+
+Expected: `3 passed`
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add database.py tests/test_database.py
+git commit -m "feat: SQLite database layer with trades/watchlist/checklist"
+```
+
+---
+
+## Task 3: KIS REST 클라이언트
+
+**Files:**
+- Create: `단타보조시스템/kis_client.py`
+- Create: `단타보조시스템/tests/test_kis_client.py`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_kis_client.py`:
+
+```python
+import pytest
+from unittest.mock import AsyncMock, patch, MagicMock
+from kis_client import KISClient
+
+@pytest.fixture
+def client():
+    return KISClient(app_key="test_key", app_secret="test_secret", account_no="12345678-01", mock=True)
+
+@pytest.mark.asyncio
+async def test_get_token_calls_api(client):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"access_token": "abc123", "token_type": "Bearer"}
+    mock_response.raise_for_status = MagicMock()
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response):
+        token = await client._fetch_token()
+    assert token == "abc123"
+
+@pytest.mark.asyncio
+async def test_get_ranking_returns_list(client):
+    client._token = "test_token"
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "output": [
+            {"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자",
+             "data_rank": "1", "stck_prpr": "75000", "prdy_ctrt": "28.50",
+             "acml_vol": "10000000", "prdy_vol": "3000000", "stck_mktc": "5000000000000"}
+        ]
+    }
+    mock_response.raise_for_status = MagicMock()
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response):
+        result = await client.get_ranking("J")
+    assert len(result) == 1
+    assert result[0]["ticker"] == "005930"
+    assert result[0]["change_rate"] == 28.50
+    assert result[0]["volume_ratio"] == pytest.approx(3.33, abs=0.1)
+
+@pytest.mark.asyncio
+async def test_get_price_returns_dict(client):
+    client._token = "test_token"
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "output": {
+            "stck_prpr": "75000",
+            "prdy_ctrt": "5.20",
+            "acml_vol": "10000000",
+            "prdy_vol": "3000000",
+            "hts_avls": "4500000",
+            "prdy_clpr": "71300"
+        }
+    }
+    mock_response.raise_for_status = MagicMock()
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response):
+        result = await client.get_price("005930")
+    assert result["price"] == 75000
+    assert result["market_cap"] == 4500000
+```
+
+- [ ] **Step 2: 테스트 실행 (실패 확인)**
+
+```bash
+pytest tests/test_kis_client.py -v
+```
+
+Expected: `ModuleNotFoundError: No module named 'kis_client'`
+
+- [ ] **Step 3: kis_client.py 구현**
+
+```python
+import httpx
+import json
+import os
+import time
+from pathlib import Path
+
+TOKEN_CACHE = ".token_cache"
+
+REAL_BASE = "https://openapi.koreainvestment.com:9443"
+MOCK_BASE = "https://openapivts.koreainvestment.com:9443"
+REAL_WS   = "wss://ops.koreainvestment.com:21000"
+MOCK_WS   = "wss://openapivts.koreainvestment.com:31000"
+
+
+class KISClient:
+    def __init__(self, app_key: str, app_secret: str, account_no: str, mock: bool = False):
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.account_no = account_no
+        self.mock = mock
+        self.base_url = MOCK_BASE if mock else REAL_BASE
+        self.ws_url = MOCK_WS if mock else REAL_WS
+        self._token: str | None = None
+        self._token_expires: float = 0
+
+    async def _fetch_token(self) -> str:
+        async with httpx.AsyncClient() as c:
+            resp = await c.post(
+                f"{self.base_url}/oauth2/tokenP",
+                json={"grant_type": "client_credentials",
+                      "appkey": self.app_key,
+                      "appsecret": self.app_secret},
+                headers={"content-type": "application/json"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()["access_token"]
+
+    async def _get_token(self) -> str:
+        # 캐시 파일 확인 (24시간 유효)
+        cache = Path(TOKEN_CACHE)
+        if cache.exists():
+            data = json.loads(cache.read_text())
+            if time.time() < data.get("expires", 0):
+                return data["token"]
+        token = await self._fetch_token()
+        cache.write_text(json.dumps({"token": token, "expires": time.time() + 86000}))
+        return token
+
+    def _headers(self, tr_id: str, token: str) -> dict:
+        return {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+        }
+
+    async def get_ranking(self, market: str = "J") -> list[dict]:
+        """시장별 등락률 상위 30종목 반환. market: J=코스피 Q=코스닥"""
+        token = self._token or await self._get_token()
+        params = {
+            "fid_cond_mrkt_div_code": market,
+            "fid_cond_scr_div_code": "20171",
+            "fid_input_iscd": "0000",
+            "fid_rank_sort_cls_code": "0",
+            "fid_input_cnt_1": "0",
+            "fid_prc_cls_code": "1",
+            "fid_input_price_1": "",
+            "fid_input_price_2": "",
+            "fid_vol_cnt": "",
+            "fid_trgt_cls_code": "0",
+            "fid_trgt_exls_cls_code": "0",
+            "fid_div_cls_code": "0",
+            "fid_rsfl_rate1": "",
+            "fid_rsfl_rate2": "",
+        }
+        async with httpx.AsyncClient() as c:
+            resp = await c.get(
+                f"{self.base_url}/uapi/domestic-stock/v1/ranking/fluctuation",
+                headers=self._headers("FHPST01700000", token),
+                params=params,
+                timeout=10,
+            )
+            resp.raise_for_status()
+        items = resp.json().get("output", [])
+        result = []
+        for it in items:
+            prev_vol = int(it.get("prdy_vol") or 1)
+            curr_vol = int(it.get("acml_vol") or 0)
+            result.append({
+                "ticker":       it["stck_shrn_iscd"],
+                "name":         it["hts_kor_isnm"],
+                "rank":         int(it["data_rank"]),
+                "price":        int(it["stck_prpr"]),
+                "change_rate":  float(it["prdy_ctrt"]),
+                "volume":       curr_vol,
+                "volume_ratio": round(curr_vol / prev_vol, 2) if prev_vol else 0,
+                "market_cap":   int(it.get("stck_mktc", 0)),
+                "market":       market,
+            })
+        return result
+
+    async def get_price(self, ticker: str) -> dict:
+        """종목 현재가·시가총액·등락률 반환"""
+        token = self._token or await self._get_token()
+        async with httpx.AsyncClient() as c:
+            resp = await c.get(
+                f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price",
+                headers=self._headers("FHKST01010100", token),
+                params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker},
+                timeout=10,
+            )
+            resp.raise_for_status()
+        out = resp.json().get("output", {})
+        prev_vol = int(out.get("prdy_vol") or 1)
+        curr_vol = int(out.get("acml_vol") or 0)
+        prev_price = int(out.get("prdy_clpr") or 1)
+        return {
+            "ticker":       ticker,
+            "price":        int(out.get("stck_prpr", 0)),
+            "change_rate":  float(out.get("prdy_ctrt", 0)),
+            "volume":       curr_vol,
+            "volume_ratio": round(curr_vol / prev_vol, 2) if prev_vol else 0,
+            "market_cap":   int(out.get("hts_avls", 0)),
+            "prev_price":   prev_price,
+        }
+
+
+def create_client_from_env() -> KISClient:
+    return KISClient(
+        app_key=os.environ["KIS_APP_KEY"],
+        app_secret=os.environ["KIS_APP_SECRET"],
+        account_no=os.environ["KIS_ACCOUNT_NO"],
+        mock=os.getenv("KIS_MOCK", "false").lower() == "true",
+    )
+```
+
+- [ ] **Step 4: 테스트 실행 (통과 확인)**
+
+```bash
+pytest tests/test_kis_client.py -v
+```
+
+Expected: `3 passed`
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add kis_client.py tests/test_kis_client.py
+git commit -m "feat: KIS REST client with token cache and ranking/price"
+```
+
+---
+
+## Task 4: SSE 브로드캐스터
+
+**Files:**
+- Create: `단타보조시스템/sse_broker.py`
+
+- [ ] **Step 1: sse_broker.py 작성**
+
+```python
+import asyncio
+import json
+from typing import AsyncGenerator
+
+class SSEBroker:
+    def __init__(self):
+        self._queues: list[asyncio.Queue] = []
+
+    async def subscribe(self) -> AsyncGenerator[str, None]:
+        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._queues.append(q)
+        try:
+            while True:
+                data = await q.get()
+                yield f"data: {data}\n\n"
+        finally:
+            self._queues.remove(q)
+
+    async def broadcast(self, event_type: str, payload: dict):
+        msg = json.dumps({"type": event_type, "data": payload})
+        dead = []
+        for q in self._queues:
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            self._queues.remove(q)
+
+
+broker = SSEBroker()
+```
+
+- [ ] **Step 2: 커밋**
+
+```bash
+git add sse_broker.py
+git commit -m "feat: SSE broker for real-time browser push"
+```
+
+---
+
+## Task 5: 폴링 스케줄러
+
+**Files:**
+- Create: `단타보조시스템/scheduler.py`
+
+- [ ] **Step 1: scheduler.py 작성**
+
+```python
+import asyncio
+import logging
+from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+logger = logging.getLogger(__name__)
+_scheduler = AsyncIOScheduler()
+_kis = None
+_broker = None
+_ranking_cache: dict = {"J": [], "Q": []}
+
+
+def init_scheduler(kis_client, sse_broker):
+    global _kis, _broker
+    _kis = kis_client
+    _broker = sse_broker
+    _scheduler.add_job(_poll_ranking, "interval", seconds=5, id="ranking_poll",
+                       misfire_grace_time=3)
+    _scheduler.start()
+    logger.info("Scheduler started")
+
+
+def stop_scheduler():
+    if _scheduler.running:
+        _scheduler.shutdown(wait=False)
+
+
+async def _poll_ranking():
+    now = datetime.now()
+    # 장 시간(09:00~15:30)에만 폴링
+    if not (9 <= now.hour < 15 or (now.hour == 15 and now.minute <= 30)):
+        return
+    try:
+        for market in ("J", "Q"):
+            items = await _kis.get_ranking(market)
+            _ranking_cache[market] = items
+        combined = sorted(
+            _ranking_cache["J"] + _ranking_cache["Q"],
+            key=lambda x: x["change_rate"], reverse=True
+        )
+        await _broker.broadcast("ranking", {
+            "J": _ranking_cache["J"][:30],
+            "Q": _ranking_cache["Q"][:30],
+            "ALL": combined[:30],
+        })
+    except Exception as e:
+        logger.warning(f"Ranking poll failed: {e}")
+
+
+def get_cached_ranking(market: str = "ALL") -> list:
+    if market == "ALL":
+        combined = sorted(
+            _ranking_cache["J"] + _ranking_cache["Q"],
+            key=lambda x: x["change_rate"], reverse=True
+        )
+        return combined[:30]
+    return _ranking_cache.get(market, [])
+```
+
+- [ ] **Step 2: 커밋**
+
+```bash
+git add scheduler.py
+git commit -m "feat: APScheduler 5-second polling for KIS ranking"
+```
+
+---
+
+## Task 6: WebSocket 매니저
+
+**Files:**
+- Create: `단타보조시스템/ws_manager.py`
+
+- [ ] **Step 1: ws_manager.py 작성**
+
+```python
+import asyncio
+import json
+import logging
+import websockets
+
+logger = logging.getLogger(__name__)
+
+class WSManager:
+    def __init__(self, ws_url: str, approval_key: str, broker):
+        self.ws_url = ws_url
+        self.approval_key = approval_key
+        self.broker = broker
+        self._subscriptions: set[str] = set()
+        self._ws = None
+        self._running = False
+        self._task: asyncio.Task | None = None
+
+    async def start(self):
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+
+    async def stop(self):
+        self._running = False
+        if self._ws:
+            await self._ws.close()
+        if self._task:
+            self._task.cancel()
+
+    async def subscribe(self, ticker: str):
+        self._subscriptions.add(ticker)
+        if self._ws:
+            await self._send_subscribe(ticker)
+
+    async def unsubscribe(self, ticker: str):
+        self._subscriptions.discard(ticker)
+        if self._ws:
+            await self._send_unsubscribe(ticker)
+
+    async def _send_subscribe(self, ticker: str):
+        msg = json.dumps({
+            "header": {"approval_key": self.approval_key,
+                       "custtype": "P", "tr_type": "1",
+                       "content-type": "utf-8"},
+            "body": {"input": {"tr_id": "H0STCNT0", "tr_key": ticker}}
+        })
+        await self._ws.send(msg)
+
+    async def _send_unsubscribe(self, ticker: str):
+        msg = json.dumps({
+            "header": {"approval_key": self.approval_key,
+                       "custtype": "P", "tr_type": "2",
+                       "content-type": "utf-8"},
+            "body": {"input": {"tr_id": "H0STCNT0", "tr_key": ticker}}
+        })
+        await self._ws.send(msg)
+
+    async def _run_loop(self):
+        while self._running:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=30) as ws:
+                    self._ws = ws
+                    logger.info("KIS WebSocket connected")
+                    # 기존 구독 복구
+                    for ticker in list(self._subscriptions):
+                        await self._send_subscribe(ticker)
+                    async for raw in ws:
+                        await self._handle(raw)
+            except Exception as e:
+                self._ws = None
+                if self._running:
+                    logger.warning(f"WebSocket disconnected: {e}. Reconnecting in 5s...")
+                    await self.broker.broadcast("ws_status", {"status": "reconnecting"})
+                    await asyncio.sleep(5)
+
+    async def _handle(self, raw: str):
+        # KIS WebSocket 응답: "|"로 구분된 체결 데이터
+        if raw.startswith("{"):
+            return  # 시스템 메시지 무시
+        parts = raw.split("|")
+        if len(parts) < 4:
+            return
+        tr_id = parts[1]
+        if tr_id != "H0STCNT0":
+            return
+        fields = parts[3].split("^")
+        if len(fields) < 13:
+            return
+        ticker = fields[0]
+        price  = int(fields[2])
+        change_rate = float(fields[5]) if fields[5] else 0.0
+        await self.broker.broadcast("price_update", {
+            "ticker": ticker,
+            "price": price,
+            "change_rate": change_rate,
+        })
+```
+
+- [ ] **Step 2: 커밋**
+
+```bash
+git add ws_manager.py
+git commit -m "feat: KIS WebSocket manager with auto-reconnect"
+```
+
+---
+
+## Task 7: FastAPI 라우터 & 앱 진입점
+
+**Files:**
+- Create: `단타보조시스템/main.py`
+- Create: `단타보조시스템/tests/test_api.py`
+
+- [ ] **Step 1: 실패하는 API 테스트 작성**
+
+`tests/test_api.py`:
+
+```python
+import pytest
+from httpx import AsyncClient, ASGITransport
+import database
+
+@pytest.fixture(autouse=True)
+def use_tmp_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIS_APP_KEY", "test")
+    monkeypatch.setenv("KIS_APP_SECRET", "test")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "00000000-01")
+    monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "test.db"))
+
+@pytest.fixture
+async def app():
+    from main import app as fastapi_app
+    from database import init_db
+    await init_db()
+    return fastapi_app
+
+@pytest.mark.asyncio
+async def test_add_trade(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/trades", json={
+            "date": "2026-05-27",
+            "ticker": "005930",
+            "name": "삼성전자",
+            "side": "BUY",
+            "price": 75000,
+            "amount": 5000000,
+            "reason": "반도체 호재"
+        })
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+@pytest.mark.asyncio
+async def test_get_trades(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await c.post("/api/trades", json={
+            "date": "2026-05-27", "ticker": "005930", "name": "삼성전자",
+            "side": "BUY", "price": 75000, "amount": 5000000, "reason": ""
+        })
+        resp = await c.get("/api/trades?date=2026-05-27")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+@pytest.mark.asyncio
+async def test_watchlist_add_remove(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.post("/api/watchlist", json={
+            "ticker": "005930", "name": "삼성전자",
+            "target_price": 80000, "stop_loss": 70000
+        })
+        assert resp.status_code == 200
+        resp2 = await c.get("/api/watchlist")
+        assert len(resp2.json()) == 1
+        resp3 = await c.delete("/api/watchlist/005930")
+        assert resp3.status_code == 200
+        resp4 = await c.get("/api/watchlist")
+        assert len(resp4.json()) == 0
+```
+
+- [ ] **Step 2: 테스트 실행 (실패 확인)**
+
+```bash
+pytest tests/test_api.py -v
+```
+
+Expected: `ModuleNotFoundError: No module named 'main'`
+
+- [ ] **Step 3: main.py 구현**
+
+```python
+import os
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from datetime import date
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+import database
+from sse_broker import broker
+from scheduler import init_scheduler, stop_scheduler, get_cached_ranking
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await database.init_db()
+    try:
+        from kis_client import create_client_from_env
+        kis = create_client_from_env()
+        init_scheduler(kis, broker)
+    except KeyError:
+        logging.warning("KIS API keys not set — polling disabled")
+    yield
+    stop_scheduler()
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# ── SSE ──────────────────────────────────────────────
+@app.get("/events")
+async def sse_events():
+    return StreamingResponse(broker.subscribe(),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+# ── 랭킹 ─────────────────────────────────────────────
+@app.get("/api/ranking")
+async def get_ranking(market: str = "ALL"):
+    return get_cached_ranking(market)
+
+
+# ── 강일지 ────────────────────────────────────────────
+class TradeIn(BaseModel):
+    date: str
+    ticker: str
+    name: str
+    side: str
+    price: int
+    amount: int
+    reason: str = ""
+
+@app.post("/api/trades")
+async def create_trade(body: TradeIn):
+    await database.add_trade(body.date, body.ticker, body.name,
+                             body.side, body.price, body.amount, body.reason)
+    return {"ok": True}
+
+@app.get("/api/trades")
+async def list_trades(date: str = None):
+    if date:
+        return await database.get_trades_by_date(date)
+    return await database.get_trades_all()
+
+@app.delete("/api/trades/{trade_id}")
+async def remove_trade(trade_id: int):
+    await database.delete_trade(trade_id)
+    return {"ok": True}
+
+
+# ── 관심종목 ──────────────────────────────────────────
+class WatchIn(BaseModel):
+    ticker: str
+    name: str
+    target_price: int = None
+    stop_loss: int = None
+    memo: str = ""
+
+@app.post("/api/watchlist")
+async def add_watch(body: WatchIn):
+    await database.add_watchlist(body.ticker, body.name,
+                                 body.target_price, body.stop_loss, body.memo)
+    return {"ok": True}
+
+@app.get("/api/watchlist")
+async def list_watch():
+    return await database.get_watchlist()
+
+@app.delete("/api/watchlist/{ticker}")
+async def remove_watch(ticker: str):
+    await database.remove_watchlist(ticker)
+    return {"ok": True}
+
+
+# ── 체크리스트 ────────────────────────────────────────
+class CheckIn(BaseModel):
+    ticker: str
+    news_ok: bool
+    naver_ok: bool
+
+@app.post("/api/checklist")
+async def run_checklist(body: CheckIn):
+    try:
+        from kis_client import create_client_from_env
+        kis = create_client_from_env()
+        info = await kis.get_price(body.ticker)
+    except Exception:
+        raise HTTPException(status_code=502, detail="KIS API 조회 실패")
+
+    score = 0
+    volume_ok = info["volume_ratio"] >= 3.0
+    surge_ok  = info["change_rate"] >= 20.0
+    cap_ok    = 0 < info["market_cap"] <= 100000  # 1,000억 = 100,000 (백만 단위)
+    no_chain  = info["change_rate"] < 29.5         # 전일 상한가 여부 간이 판단
+
+    if body.news_ok:  score += 30
+    if volume_ok:     score += 20
+    if surge_ok:      score += 20
+    if body.naver_ok: score += 15
+    if cap_ok:        score += 10
+    if no_chain:      score += 5
+
+    result = "진입 검토" if score >= 70 else ("관망" if score >= 50 else "제외")
+
+    await database.save_checklist(
+        body.ticker, str(date.today()), score,
+        body.news_ok, volume_ok, surge_ok, body.naver_ok, cap_ok, no_chain, result
+    )
+    return {
+        "ticker": body.ticker,
+        "score": score,
+        "result": result,
+        "detail": {
+            "news_ok": body.news_ok,
+            "volume_ok": volume_ok,
+            "surge_ok": surge_ok,
+            "naver_ok": body.naver_ok,
+            "cap_ok": cap_ok,
+            "no_chain": no_chain,
+        },
+        "price_info": info,
+    }
+
+
+# ── 메인 페이지 ───────────────────────────────────────
+@app.get("/")
+async def root():
+    return HTMLResponse(open("static/index.html", encoding="utf-8").read())
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+```
+
+- [ ] **Step 4: 테스트 실행 (통과 확인)**
+
+```bash
+pytest tests/test_api.py -v
+```
+
+Expected: `3 passed`
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add main.py tests/test_api.py
+git commit -m "feat: FastAPI routes — trades, watchlist, checklist, SSE"
+```
+
+---
+
+## Task 8: 프론트엔드 — 기본 레이아웃 & SSE 연결
+
+**Files:**
+- Create: `단타보조시스템/static/index.html`
+
+- [ ] **Step 1: index.html 기본 골격 작성**
+
+`static/index.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>단타 보조 시스템</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0f172a;color:#94a3b8;font-family:'Malgun Gothic',sans-serif;font-size:12px;height:100vh;display:flex;flex-direction:column}
+  #header{background:#0f172a;padding:6px 12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1e293b;flex-shrink:0}
+  #header h1{color:#38bdf8;font-size:14px}
+  #status-badge{padding:2px 8px;border-radius:10px;font-size:11px}
+  .connected{background:#16a34a;color:#fff}
+  .disconnected{background:#dc2626;color:#fff}
+  .reconnecting{background:#d97706;color:#fff}
+  #grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:1px;background:#1e293b;flex:1;overflow:hidden}
+  .panel{background:#0f172a;padding:10px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+  .panel-title{font-size:12px;font-weight:bold;flex-shrink:0}
+  .t-yellow{color:#f59e0b} .t-purple{color:#a78bfa} .t-green{color:#34d399} .t-red{color:#f87171}
+  .btn{padding:3px 10px;border-radius:3px;border:none;cursor:pointer;font-size:11px;font-family:inherit}
+  .btn-green{background:#059669;color:#fff} .btn-red{background:#dc2626;color:#fff}
+  .btn-blue{background:#2563eb;color:#fff} .btn-gray{background:#374151;color:#94a3b8}
+  input{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:3px 6px;border-radius:3px;font-size:11px;font-family:inherit}
+  .row{display:flex;justify-content:space-between;align-items:center;background:#1e293b;padding:4px 7px;border-radius:3px}
+  .up{color:#f87171;font-weight:bold} .dn{color:#60a5fa}
+  #market-time{color:#64748b;font-size:11px}
+  #toast-container{position:fixed;bottom:16px;right:16px;display:flex;flex-direction:column;gap:6px;z-index:999}
+  .toast{background:#1e293b;border:1px solid #334155;padding:8px 14px;border-radius:6px;font-size:11px;animation:fadeout 3s forwards}
+  @keyframes fadeout{0%{opacity:1}70%{opacity:1}100%{opacity:0}}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>⚡ 단타 보조 시스템</h1>
+  <div style="display:flex;gap:10px;align-items:center">
+    <span id="market-time"></span>
+    <span id="status-badge" class="disconnected">● 연결 중...</span>
+  </div>
+</div>
+
+<div id="grid">
+  <div class="panel" id="panel-ranking">
+    <div class="panel-title t-yellow">🔥 실시간 급등 랭킹</div>
+    <!-- Task 9에서 채움 -->
+  </div>
+  <div class="panel" id="panel-checklist">
+    <div class="panel-title t-purple">✅ 상한가 체크리스트</div>
+    <!-- Task 10에서 채움 -->
+  </div>
+  <div class="panel" id="panel-journal">
+    <div class="panel-title t-green">📓 강일지</div>
+    <!-- Task 11에서 채움 -->
+  </div>
+  <div class="panel" id="panel-watchlist">
+    <div class="panel-title t-red">👁️ 관심종목</div>
+    <!-- Task 12에서 채움 -->
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script>
+// ── 유틸 ──────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const today = () => new Date().toISOString().slice(0,10);
+
+function toast(msg, color='#334155') {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.style.borderColor = color;
+  el.textContent = msg;
+  $('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: {'content-type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// ── 시계 ──────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  const hm = now.toTimeString().slice(0,8);
+  const h = now.getHours(), m = now.getMinutes();
+  const isOpen = (h > 9 || (h===9 && m>=0)) && (h < 15 || (h===15 && m<=30));
+  $('market-time').textContent = `${hm}  ${isOpen ? '장중' : '장마감'}`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── SSE ───────────────────────────────────────────────
+let sseHandlers = {};
+
+function registerSSE(type, fn) { sseHandlers[type] = fn; }
+
+function connectSSE() {
+  const badge = $('status-badge');
+  const es = new EventSource('/events');
+  es.onopen = () => {
+    badge.className = 'connected';
+    badge.textContent = '● 연결됨';
+  };
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (sseHandlers[msg.type]) sseHandlers[msg.type](msg.data);
+  };
+  es.onerror = () => {
+    badge.className = 'reconnecting';
+    badge.textContent = '● 재연결 중...';
+    es.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+connectSSE();
+</script>
+
+</body>
+</html>
+```
+
+- [ ] **Step 2: 서버 기동 및 브라우저 확인**
+
+```bash
+python main.py
+```
+
+브라우저에서 `http://localhost:8000` 접속 → 헤더에 "연결됨" 초록 배지 확인, 4개 빈 패널 표시 확인.
+
+- [ ] **Step 3: 커밋**
+
+```bash
+git add static/index.html
+git commit -m "feat: frontend base layout with SSE connection"
+```
+
+---
+
+## Task 9: 프론트엔드 — 급등 랭킹 패널
+
+**Files:**
+- Modify: `단타보조시스템/static/index.html` (panel-ranking 영역)
+
+- [ ] **Step 1: 랭킹 패널 HTML·JS 추가**
+
+`static/index.html` 의 `panel-ranking` div 안쪽과 `</script>` 바로 위에 아래 코드를 삽입:
+
+**panel-ranking div 내부 (주석 대체):**
+```html
+<div class="panel-title t-yellow">🔥 실시간 급등 랭킹</div>
+<div style="display:flex;gap:4px;flex-shrink:0">
+  <button class="btn btn-blue" onclick="setMarket('J')" id="btn-J">코스피</button>
+  <button class="btn btn-gray" onclick="setMarket('Q')" id="btn-Q">코스닥</button>
+  <button class="btn btn-gray" onclick="setMarket('ALL')" id="btn-ALL">전체</button>
+</div>
+<div style="display:flex;justify-content:space-between;color:#475569;padding:0 4px;flex-shrink:0">
+  <span>종목</span><span>등락률</span><span>거래량비</span>
+</div>
+<div id="ranking-list" style="display:flex;flex-direction:column;gap:2px;overflow-y:auto"></div>
+```
+
+**`</script>` 바로 위에 삽입:**
+```javascript
+// ── 랭킹 패널 ─────────────────────────────────────────
+let _rankMarket = 'J';
+let _rankData = {J:[], Q:[], ALL:[]};
+
+function setMarket(m) {
+  _rankMarket = m;
+  ['J','Q','ALL'].forEach(k => {
+    $('btn-'+k).className = 'btn ' + (k===m ? 'btn-blue' : 'btn-gray');
+  });
+  renderRanking();
+}
+
+function renderRanking() {
+  const list = $('ranking-list');
+  if (!list) return;
+  const items = _rankData[_rankMarket] || [];
+  list.innerHTML = items.map(it => {
+    const hot = it.change_rate >= 20;
+    const color = hot ? '#f87171' : (it.change_rate >= 10 ? '#f97316' : '#94a3b8');
+    return `<div class="row" style="cursor:pointer;border-left:3px solid ${hot?'#f87171':'transparent'}"
+      onclick="fillChecklist('${it.ticker}','${it.name}')">
+      <span style="color:#e2e8f0;min-width:80px">${it.name}</span>
+      <span style="color:${color};font-weight:${hot?'bold':'normal'};min-width:52px;text-align:right">+${it.change_rate.toFixed(1)}%</span>
+      <span style="color:#64748b;min-width:40px;text-align:right">${it.volume_ratio}x</span>
+    </div>`;
+  }).join('');
+}
+
+registerSSE('ranking', data => {
+  _rankData = data;
+  renderRanking();
+});
+
+// 초기 로드
+fetch('/api/ranking?market=ALL').then(r=>r.json()).then(d => {
+  _rankData.ALL = d;
+  fetch('/api/ranking?market=J').then(r=>r.json()).then(j => { _rankData.J = j; renderRanking(); });
+  fetch('/api/ranking?market=Q').then(r=>r.json()).then(q => { _rankData.Q = q; });
+});
+```
+
+- [ ] **Step 2: 서버 재기동 후 확인**
+
+```bash
+python main.py
+```
+
+브라우저 → 좌상단 패널에 코스피/코스닥/전체 탭 표시 확인. 장 시간에는 5초마다 목록 업데이트 확인.
+
+- [ ] **Step 3: 커밋**
+
+```bash
+git add static/index.html
+git commit -m "feat: ranking panel with tab switching and 20%+ highlight"
+```
+
+---
+
+## Task 10: 프론트엔드 — 상한가 체크리스트 패널
+
+**Files:**
+- Modify: `단타보조시스템/static/index.html` (panel-checklist 영역)
+
+- [ ] **Step 1: 체크리스트 패널 HTML·JS 추가**
+
+**panel-checklist div 내부 (주석 대체):**
+```html
+<div class="panel-title t-purple">✅ 상한가 체크리스트</div>
+<div style="display:flex;gap:4px;flex-shrink:0">
+  <input id="cl-ticker" placeholder="종목코드 (예: 005930)" style="flex:1">
+  <button class="btn btn-blue" onclick="runChecklist()">분석</button>
+</div>
+<div id="cl-name" style="color:#64748b;font-size:11px"></div>
+<div id="cl-items" style="display:flex;flex-direction:column;gap:3px"></div>
+<div id="cl-result" style="display:none;padding:8px;border-radius:4px;text-align:center;font-weight:bold;flex-shrink:0"></div>
+```
+
+**`</script>` 바로 위에 삽입:**
+```javascript
+// ── 체크리스트 패널 ────────────────────────────────────
+function fillChecklist(ticker, name) {
+  $('cl-ticker').value = ticker;
+  $('cl-name').textContent = name;
+}
+
+async function runChecklist() {
+  const ticker = $('cl-ticker').value.trim();
+  if (!ticker) return;
+  const news_ok  = confirm(`[${ticker}] 당일 강력 호재 뉴스가 있나요?`);
+  const naver_ok = confirm(`[${ticker}] 네이버 실시간 검색에 등재돼 있나요?`);
+  try {
+    const r = await api('POST', '/api/checklist', { ticker, news_ok, naver_ok });
+    const d = r.detail;
+    const items = [
+      { label:'당일 호재 뉴스',    ok: d.news_ok,   score: 30 },
+      { label:'거래량 3배 이상',   ok: d.volume_ok, score: 20 },
+      { label:'등락률 20% 이상',   ok: d.surge_ok,  score: 20 },
+      { label:'네이버 실검 등재',  ok: d.naver_ok,  score: 15 },
+      { label:'시총 1,000억 이하', ok: d.cap_ok,    score: 10 },
+      { label:'연속 상한가 아님',  ok: d.no_chain,  score:  5 },
+    ];
+    $('cl-items').innerHTML = items.map(it =>
+      `<div class="row">
+        <span>${it.ok ? '✅' : '⬜'} ${it.label}</span>
+        <span style="color:${it.ok?'#4ade80':'#475569'}">+${it.score}</span>
+      </div>`
+    ).join('');
+    const el = $('cl-result');
+    el.style.display = 'block';
+    el.style.background = r.score >= 70 ? '#15803d' : (r.score >= 50 ? '#92400e' : '#7f1d1d');
+    el.style.color = '#fff';
+    el.textContent = `점수: ${r.score}/100  →  ${r.result}`;
+    $('cl-name').textContent = ticker;
+  } catch(e) {
+    toast('체크리스트 분석 실패: ' + e.message, '#f87171');
+  }
+}
+```
+
+- [ ] **Step 2: 확인**
+
+브라우저 → 랭킹 패널에서 종목 클릭 → 체크리스트 패널 코드 자동 입력 확인. "분석" 버튼 → 팝업 2개 → 결과 점수 표시 확인.
+
+- [ ] **Step 3: 커밋**
+
+```bash
+git add static/index.html
+git commit -m "feat: checklist panel with auto-score from KIS API"
+```
+
+---
+
+## Task 11: 프론트엔드 — 강일지 패널
+
+**Files:**
+- Modify: `단타보조시스템/static/index.html` (panel-journal 영역)
+
+- [ ] **Step 1: 강일지 패널 HTML·JS 추가**
+
+**panel-journal div 내부 (주석 대체):**
+```html
+<div class="panel-title t-green">📓 강일지 <span id="jnl-date" style="color:#64748b;font-weight:normal"></span></div>
+<div style="display:flex;gap:4px;flex-shrink:0">
+  <button class="btn btn-green" onclick="openTradeModal('BUY')">+ 매수</button>
+  <button class="btn btn-red"   onclick="openTradeModal('SELL')">+ 매도</button>
+</div>
+<div id="jnl-list" style="display:flex;flex-direction:column;gap:2px;overflow-y:auto;flex:1"></div>
+<div class="row" style="flex-shrink:0">
+  <span>오늘 총 손익</span>
+  <span id="jnl-total" style="font-weight:bold">0원</span>
+</div>
+<div id="jnl-chart" style="flex-shrink:0"></div>
+
+<!-- 매매 기록 모달 -->
+<div id="trade-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center">
+  <div style="background:#1e293b;padding:16px;border-radius:8px;width:280px;display:flex;flex-direction:column;gap:8px">
+    <div id="modal-title" style="font-weight:bold;color:#e2e8f0"></div>
+    <input id="m-ticker" placeholder="종목코드">
+    <input id="m-name"   placeholder="종목명">
+    <input id="m-price"  placeholder="가격 (원)" type="number">
+    <input id="m-amount" placeholder="금액 (원)" type="number">
+    <input id="m-reason" placeholder="진입 이유 (호재 뉴스 요약)">
+    <div style="display:flex;gap:6px">
+      <button class="btn btn-blue" style="flex:1" onclick="submitTrade()">저장</button>
+      <button class="btn btn-gray" style="flex:1" onclick="closeTradeModal()">취소</button>
+    </div>
+  </div>
+</div>
+```
+
+**`</script>` 바로 위에 삽입:**
+```javascript
+// ── 강일지 패널 ────────────────────────────────────────
+let _tradeSide = 'BUY';
+
+function openTradeModal(side) {
+  _tradeSide = side;
+  $('modal-title').textContent = side === 'BUY' ? '매수 기록' : '매도 기록';
+  $('modal-title').style.color = side === 'BUY' ? '#4ade80' : '#f87171';
+  ['m-ticker','m-name','m-price','m-amount','m-reason'].forEach(id => $(id).value = '');
+  $('trade-modal').style.display = 'flex';
+}
+
+function closeTradeModal() {
+  $('trade-modal').style.display = 'none';
+}
+
+async function submitTrade() {
+  const ticker = $('m-ticker').value.trim();
+  const name   = $('m-name').value.trim();
+  const price  = parseInt($('m-price').value);
+  const amount = parseInt($('m-amount').value);
+  const reason = $('m-reason').value.trim();
+  if (!ticker || !name || !price || !amount) {
+    toast('모든 필드를 입력해주세요', '#f59e0b'); return;
+  }
+  try {
+    await api('POST', '/api/trades', { date: today(), ticker, name, side: _tradeSide, price, amount, reason });
+    closeTradeModal();
+    loadJournal();
+    toast('기록 완료', '#4ade80');
+  } catch(e) {
+    toast('저장 실패: ' + e.message, '#f87171');
+  }
+}
+
+async function deleteTrade(id) {
+  if (!confirm('삭제하시겠습니까?')) return;
+  await api('DELETE', `/api/trades/${id}`);
+  loadJournal();
+}
+
+function renderMiniChart(trades7) {
+  // 최근 7일 손익 인라인 SVG 바 차트
+  const dates = [...new Set(trades7.map(t=>t.date))].sort().slice(-7);
+  const pnls = dates.map(d => trades7.filter(t=>t.date===d).reduce((s,t)=>s+t.pnl,0));
+  const maxAbs = Math.max(1, ...pnls.map(Math.abs));
+  const w = 30, h = 30, gap = 4;
+  const bars = pnls.map((p,i) => {
+    const barH = Math.round((Math.abs(p)/maxAbs)*h*0.9) || 2;
+    const y = p >= 0 ? h - barH : h;
+    const color = p >= 0 ? '#4ade80' : '#f87171';
+    return `<rect x="${i*(w+gap)}" y="${y}" width="${w}" height="${barH}" fill="${color}" rx="2"/>`;
+  }).join('');
+  $('jnl-chart').innerHTML = `<svg width="${dates.length*(w+gap)}" height="${h+4}" style="margin-top:4px">${bars}</svg>`;
+}
+
+async function loadJournal() {
+  $('jnl-date').textContent = today();
+  const all  = await fetch('/api/trades').then(r=>r.json());
+  const todayTrades = all.filter(t=>t.date===today());
+
+  // 손익 계산: 매도 건에 대해 당일 같은 종목 최근 매수와 LIFO 매칭
+  const buys = {};
+  [...todayTrades].filter(t=>t.side==='BUY').forEach(t => {
+    if (!buys[t.ticker]) buys[t.ticker] = [];
+    buys[t.ticker].push({...t});
+  });
+  todayTrades.filter(t=>t.side==='SELL').forEach(t => {
+    const stack = buys[t.ticker];
+    if (stack && stack.length > 0) {
+      const buy = stack.pop();
+      const pnl = Math.round((t.price - buy.price) / buy.price * t.amount);
+      t.pnl = pnl;
+    }
+  });
+
+  const total = todayTrades.reduce((s,t)=>s+t.pnl,0);
+  $('jnl-total').textContent = (total >= 0 ? '+' : '') + total.toLocaleString() + '원';
+  $('jnl-total').style.color = total >= 0 ? '#4ade80' : '#f87171';
+
+  $('jnl-list').innerHTML = todayTrades.map(t => {
+    const pnlStr = t.side==='SELL'
+      ? `<span style="color:${t.pnl>=0?'#4ade80':'#f87171'};font-weight:bold">${t.pnl>=0?'+':''}${t.pnl.toLocaleString()}원</span>`
+      : `<span style="color:#64748b">매수중</span>`;
+    return `<div class="row">
+      <div style="flex:1">
+        <span style="color:#e2e8f0">${t.name}</span>
+        <span style="color:#64748b;margin-left:4px">${t.side==='BUY'?'매수':'매도'} ${t.amount.toLocaleString()}원</span>
+        ${t.reason ? `<div style="color:#475569;font-size:10px">${t.reason}</div>` : ''}
+      </div>
+      ${pnlStr}
+      <button class="btn btn-gray" style="margin-left:4px" onclick="deleteTrade(${t.id})">✕</button>
+    </div>`;
+  }).join('');
+
+  renderMiniChart(all);
+}
+
+loadJournal();
+```
+
+- [ ] **Step 2: 확인**
+
+브라우저 → "매수" 버튼 클릭 → 모달 표시 → 정보 입력 후 저장 → 목록에 표시, 총 손익 계산 확인.
+
+- [ ] **Step 3: 커밋**
+
+```bash
+git add static/index.html
+git commit -m "feat: journal panel with trade recording and PnL calculation"
+```
+
+---
+
+## Task 12: 프론트엔드 — 관심종목 패널
+
+**Files:**
+- Modify: `단타보조시스템/static/index.html` (panel-watchlist 영역)
+
+- [ ] **Step 1: 관심종목 패널 HTML·JS 추가**
+
+**panel-watchlist div 내부 (주석 대체):**
+```html
+<div class="panel-title t-red">👁️ 관심종목 실시간</div>
+<div style="display:flex;gap:4px;flex-shrink:0">
+  <input id="wl-ticker"  placeholder="종목코드" style="width:80px">
+  <input id="wl-name"    placeholder="종목명" style="flex:1">
+  <button class="btn btn-blue" onclick="addWatch()">+</button>
+</div>
+<div style="display:flex;gap:4px;flex-shrink:0">
+  <input id="wl-target" placeholder="목표가" type="number" style="flex:1">
+  <input id="wl-stop"   placeholder="손절가" type="number" style="flex:1">
+</div>
+<div id="wl-list" style="display:flex;flex-direction:column;gap:3px;overflow-y:auto;flex:1"></div>
+```
+
+**`</script>` 바로 위에 삽입:**
+```javascript
+// ── 관심종목 패널 ──────────────────────────────────────
+let _watchPrices = {};  // ticker → {price, change_rate}
+
+registerSSE('price_update', data => {
+  _watchPrices[data.ticker] = data;
+  renderWatchlist();
+  checkAlerts(data);
+});
+
+function checkAlerts(data) {
+  const items = _wlItems || [];
+  const item = items.find(w=>w.ticker===data.ticker);
+  if (!item) return;
+  if (item.target_price && data.price >= item.target_price) {
+    toast(`🎯 ${item.name} 목표가 도달! (${data.price.toLocaleString()}원)`, '#4ade80');
+    if (Notification.permission === 'granted')
+      new Notification(`목표가 도달: ${item.name}`, {body: `현재가 ${data.price.toLocaleString()}원`});
+  }
+  if (item.stop_loss && data.price <= item.stop_loss) {
+    toast(`🚨 ${item.name} 손절가 도달! (${data.price.toLocaleString()}원)`, '#f87171');
+    if (Notification.permission === 'granted')
+      new Notification(`손절가 도달: ${item.name}`, {body: `현재가 ${data.price.toLocaleString()}원`});
+  }
+}
+
+let _wlItems = [];
+
+function renderWatchlist() {
+  $('wl-list').innerHTML = _wlItems.map(item => {
+    const live = _watchPrices[item.ticker];
+    const priceStr = live ? live.price.toLocaleString() : '-';
+    const rateStr  = live ? `${live.change_rate >= 0 ? '+' : ''}${live.change_rate.toFixed(1)}%` : '';
+    const rateColor= live ? (live.change_rate >= 0 ? '#f87171' : '#60a5fa') : '#64748b';
+    const border   = live && live.change_rate >= 20 ? '#f87171' : (live && live.change_rate >= 10 ? '#f59e0b' : '#334155');
+    return `<div class="row" style="border-left:3px solid ${border}">
+      <div style="flex:1">
+        <span style="color:#e2e8f0">${item.name}</span>
+        <span style="color:${rateColor};font-weight:bold;margin-left:6px">${rateStr}</span>
+        <span style="color:#64748b;margin-left:4px">${priceStr}원</span>
+        <div style="color:#475569;font-size:10px">목표 ${item.target_price?.toLocaleString()||'-'} / 손절 ${item.stop_loss?.toLocaleString()||'-'}</div>
+      </div>
+      <button class="btn btn-gray" onclick="removeWatch('${item.ticker}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+async function addWatch() {
+  const ticker = $('wl-ticker').value.trim().toUpperCase();
+  const name   = $('wl-name').value.trim();
+  if (!ticker || !name) { toast('종목코드와 종목명을 입력하세요', '#f59e0b'); return; }
+  const target = parseInt($('wl-target').value) || null;
+  const stop   = parseInt($('wl-stop').value)   || null;
+  if (_wlItems.length >= 20) { toast('최대 20종목까지 등록 가능합니다', '#f59e0b'); return; }
+  await api('POST', '/api/watchlist', {ticker, name, target_price: target, stop_loss: stop});
+  ['wl-ticker','wl-name','wl-target','wl-stop'].forEach(id => $(id).value = '');
+  if (Notification.permission === 'default') Notification.requestPermission();
+  loadWatchlist();
+  toast(`${name} 등록됨`, '#4ade80');
+}
+
+async function removeWatch(ticker) {
+  await api('DELETE', `/api/watchlist/${ticker}`);
+  loadWatchlist();
+}
+
+async function loadWatchlist() {
+  _wlItems = await fetch('/api/watchlist').then(r=>r.json());
+  renderWatchlist();
+}
+
+loadWatchlist();
+```
+
+- [ ] **Step 2: 확인**
+
+브라우저 → 관심종목 추가 → 목록 표시 확인. 장 중이라면 SSE를 통해 실시간 가격 업데이트 확인.
+
+- [ ] **Step 3: 전체 테스트 수행**
+
+```bash
+pytest tests/ -v
+```
+
+Expected: 모든 테스트 통과
+
+- [ ] **Step 4: 최종 커밋**
+
+```bash
+git add static/index.html
+git commit -m "feat: watchlist panel with real-time price and target/stop alerts"
+```
+
+---
+
+## Task 13: WebSocket 매니저 앱 통합
+
+**Files:**
+- Modify: `단타보조시스템/main.py`
+
+- [ ] **Step 1: lifespan에 WebSocket 매니저 통합**
+
+`main.py` 의 `lifespan` 함수를 아래로 교체:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await database.init_db()
+    ws_mgr = None
+    try:
+        from kis_client import create_client_from_env
+        from ws_manager import WSManager
+        kis = create_client_from_env()
+        # WebSocket 승인키 발급 (토큰과 동일 엔드포인트)
+        approval_key = await kis._get_token()
+        ws_mgr = WSManager(kis.ws_url, approval_key, broker)
+        await ws_mgr.start()
+        app.state.ws_mgr = ws_mgr
+        init_scheduler(kis, broker)
+    except KeyError:
+        logging.warning("KIS API keys not set — polling and WebSocket disabled")
+    yield
+    stop_scheduler()
+    if ws_mgr:
+        await ws_mgr.stop()
+```
+
+- [ ] **Step 2: watchlist 엔드포인트에서 WebSocket 구독 연동**
+
+`main.py` 의 `add_watch` 와 `remove_watch` 라우터를 아래로 교체:
+
+```python
+@app.post("/api/watchlist")
+async def add_watch(body: WatchIn, request: Request):
+    await database.add_watchlist(body.ticker, body.name,
+                                 body.target_price, body.stop_loss, body.memo)
+    ws_mgr = getattr(request.app.state, 'ws_mgr', None)
+    if ws_mgr:
+        await ws_mgr.subscribe(body.ticker)
+    return {"ok": True}
+
+@app.delete("/api/watchlist/{ticker}")
+async def remove_watch(ticker: str, request: Request):
+    await database.remove_watchlist(ticker)
+    ws_mgr = getattr(request.app.state, 'ws_mgr', None)
+    if ws_mgr:
+        await ws_mgr.unsubscribe(ticker)
+    return {"ok": True}
+```
+
+`main.py` 상단 import에 `from fastapi import FastAPI, HTTPException, Request` 추가.
+
+- [ ] **Step 3: 서버 재기동 및 최종 통합 확인**
+
+```bash
+python main.py
+```
+
+브라우저에서:
+1. 관심종목에 종목 추가 → 콘솔 로그에 `KIS WebSocket connected` 확인
+2. 랭킹 종목 클릭 → 체크리스트 자동 입력 확인
+3. 매수/매도 기록 → 손익 계산 확인
+4. 헤더 시계 및 연결 배지 정상 작동 확인
+
+- [ ] **Step 4: 최종 커밋**
+
+```bash
+git add main.py
+git commit -m "feat: integrate WebSocket manager with watchlist subscription"
+```
+
+---
+
+## 셀프 리뷰
+
+**스펙 커버리지 확인:**
+- ✅ 실시간 급등 랭킹 (Task 5, 9)
+- ✅ 상한가 체크리스트 점수화 (Task 7, 10)
+- ✅ 강일지 CRUD + 손익 계산 (Task 2, 7, 11)
+- ✅ 관심종목 실시간 + 알림 (Task 6, 12, 13)
+- ✅ KIS REST 토큰 캐시 (Task 3)
+- ✅ WebSocket 자동 재연결 (Task 6)
+- ✅ 장 마감 폴링 중단 (Task 5)
+- ✅ .env 키 미설정 시 안내 (Task 7)
+- ✅ SQLite 3개 테이블 (Task 2)
+
+**타입 일관성:**
+- `KISClient._get_token()` → Task 3 정의, Task 13에서 동일하게 호출
+- `WSManager` → Task 6 정의, Task 13에서 동일 시그니처 사용
+- `broker.broadcast(type, payload)` → Task 4 정의, 모든 곳에서 동일하게 호출
+- `get_cached_ranking(market)` → Task 5 정의, Task 7 라우터에서 동일하게 호출
